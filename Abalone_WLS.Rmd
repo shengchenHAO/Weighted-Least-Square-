@@ -1,0 +1,406 @@
+---
+title: "Weighted Regression in SAS, R, and Python"
+author: "Eli Schultz, Huan Tan, and Shengchen Hao"
+date: "December 6, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<style>
+p.caption {
+  font-size: 0.6em;
+}
+</style>
+
+## Weighted Least Squares {.tabset}
+The purpose of this tutorial is to demonstrate weighted least squares in SAS, R, and Python. The data set used in the example below is available [here](https://archive.ics.uci.edu/ml/datasets/abalone). The three approaches to weighting that will be used are among those outlined [here](https://onlinecourses.science.psu.edu/stat462/node/186) (one of the approaches is modified slightly).
+
+The goal of the model will be to estimate an abalone's number of rings as a function of its length. For context, the number of rings an abalone has is a way of measuring its age.
+
+```{r, echo = FALSE, out.width = "50%", fig.show = "hold", fig.align = "center", fig.cap = "(source: Wikimedia Commons)"}
+knitr::include_graphics(c("Abalone.png"))
+```
+
+### SAS
+
+We begin by reading in the data set, fitting a simple linear model, and examining the plot of residuals against fitted values. We need to enable graphics in SAS in order to be able to view diagnostic plots.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Enable graphics to view diagnostic plots */
+ods graphics on;
+ods pdf file="diagnostics.pdf";
+
+/* Read in data */
+proc import datafile="abalone.csv" out=abalone;
+     getnames=no;
+run;
+
+/* Provide more descriptive names to variables */
+data abalone;
+     set abalone;
+     rename var1 = sex
+            var2 = length
+            var3 = diameter
+            var4 = height
+            var5 = whole_wt
+            var6 = shucked_wt
+            var7 = visc_wt
+            var8 = shell_wt
+            var9 = rings;
+run;
+
+/* First, fit OLS model of rings (age) as a function of length */
+proc reg data=abalone plots = residualbypredicted;
+     ods select residualbypredicted;
+     model rings = length;
+run;
+ods pdf close;
+```
+
+The resulting plot is shown below, alongside the regression output. It displays a prominent "megaphone'' shape, which is indicative of nonconstant variance. This is a violation of one of the essential assumptions underpinning ordinary least squares regression. Weighted regression is designed to address this issue.
+
+```{r, echo = FALSE, fig.align="center", out.width = "50%"}
+knitr::include_graphics("abalone_resid_fit.png")
+```
+
+The regression output is shown below as well. Note that the coefficent on length is signficant  and $R^2 = .3099$ gives some idea of the quality of the fit.
+
+```{r, echo = FALSE, fig.align="center", out.width = "50%"}
+knitr::include_graphics("OLS.png")
+```
+
+The crux of weighted regression lies in determining the appropriate weights to use. A number of approaches are outlined, three of which will be demonstrated (one in slightly modified form). All of these approaches will in some form make use of the OLS output, so we will run the regression procedure again, this time saving the fitted values and residuals as part of the data set.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Save fitted values from regression to use as weights */
+proc reg data=abalone plots = residualbypredicted;
+     model rings = length;
+     output out = abalone
+            p = yhat_1 /* Saves fitted values to output data set */
+            r = resids; /* Saves residuals to output data set */
+run;
+```
+
+**1.**
+
+The simplest approach that will be demonstrated here is weighting each observation by the inverse of its fitted OLS value. This is a slight modification of an approach outlined in the link above, which suggests weighting by value of the predictor. Since we only have one predictor, weighting by the predictor would not make sense here. 
+
+The first step is to add the inverted fitted value to the data set:
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Compute weights */
+data abalone;
+     set abalone;
+     wt_1 = 1/yhat_1;
+run;
+```
+
+Once this has been accomplished, the weighted regression can be fitted.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Fit regression weighting by fitted value */
+proc reg data=abalone;
+     weight wt_1;
+     model rings = length;
+run;
+```
+
+This results in the following output:
+
+```{r, echo = FALSE, fig.align = "center", out.width = "50%"}
+knitr::include_graphics("WT_1_REG.png")
+```
+
+The predictor remains statistically significant (its t-statistic actually increases from 43.30 to 50.62), and its coefficient increases in magnitude from 14.94641 to 15.52974. The $R^2 = 0.3803$ represents an improvement of about $0.08$ from the OLS model.
+
+**2.**
+
+The next two approaches will make use of the squared residuals from the OLS model and the absolute value of the residuals from the OLS model, so we will add those to our data set as well.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Create variables corresponding to square and absolute value of residuals */
+data abalone;
+     set abalone;
+     resids_sq = resids**2;
+     resids_abs = abs(resids);
+run;
+```
+
+The first of these approaches will regress the absolute value of the residuals from the OLS model on the fitted values from the OLS model. It will then store the fitted values from this model for use as weights.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Fit absolute value of residuals against fitted values */
+proc reg data=abalone;
+     model resids_abs = yhat_1;
+     output out = abalone
+            p = yhat_2;
+run;
+
+*/ Store weight in data set */
+/* Compute weights */
+data abalone;
+     set abalone;
+     wt_2 = 1/yhat_2**2;
+run;
+```
+
+These weights are then used to fit another model.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Fit regression weighting by residuals from absolute residuals vs fitted values model */
+proc reg data=abalone;
+     weight wt_2;
+     model rings = length;
+run;
+```
+
+This produces the following ouptut:
+
+```{r, echo = FALSE, fig.align = "center", out.width = "50%"}
+knitr::include_graphics("WT_2_REG.png")
+```
+
+In this case, the predictor remains statistically significant (with a still larger t-statistic of 58.05) and its coefficient increases slightly again to 15.99657. The $R^2$ also increases again to .4467.
+
+**3.**
+
+The final method that will be demonstrated will repeat the process from the second model, but replace the absolute value of the residuals by the square of the residuals. So the square of the residuals from the OLS model will be regressed on the fitted values from the OLS model, and the fitted values from this second model will then be stored for use as weights.
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Fit square of residuals against fitted values */
+proc reg data=abalone;
+     model resids_sq = yhat_1;
+     output out = abalone
+            p = yhat_3;
+run;
+
+*/ Store weight in data set */
+/* Compute weights */
+data abalone;
+     set abalone;
+     wt_3= 1/yhat_3**2;
+run;
+```
+
+And the weight is used to fit a third regresison model:
+
+```{sas, echo = TRUE, eval = FALSE}
+/* Fit regression weighting by residuals from squared residuals vs fitted values model */
+proc reg data=abalone;
+     weight wt_3;
+     model rings = length;
+run;
+```
+
+This produces the following output:
+
+```{r, echo = FALSE, fig.align = "center", out.width = "50%"}
+knitr::include_graphics("WT_3_REG.png")
+```
+
+Yet again, the coefficient increases, this time to 16.15641, and remains statistically significant with a t-statistic of 68.01. The $R^2$ also increases once again, to 0.5256.
+
+The increases in $R^2$ should be taken with a grain of salt, because weighting can be thought of as "pushing the data closer to a fitted line." However, "pushing the data closer to a fitted line" can in some sense be thought of a reduction in variance, so the increasing $R^2$ does do a good job of demonstrating the power of weighted least squares vis-à-vis heterscedasticity. (Note that weighting methods are not limited to the three we demonstrated here.) 
+
+### R
+
+We begin by reading in the data set, fitting a simple linear model, and examining the plot of residuals against fitted values.
+
+```{r}
+abalone <- read.csv("abalone.data.txt", header=FALSE)
+colnames(abalone)<-c("sex","length","diameter","height",
+                  "whole_weight","shucked_weight","viscera_weight",
+                     "shell_weight","rings")
+```
+
+
+```{r}
+g<-lm(rings~length,data=abalone)
+summary(g)
+plot(predict(g,data=abalone),resid(g,data=abalone),xlab = "fitted", ylab="residuals")
+abline(h=0,col="red")
+```
+
+From the original OLS regression model, we see that that length variable is significant, yet with low $R^2$ (0.3099). While checking the residual plot of the fitted verses residuals, it is clear that we now have a heteroscedasticity problem, which violates a key OLS assumption. 
+
+One way to solve this problem is by using weighted least squares regression, and below, we use three different weighting methods in R to demostrate how weighted least squares regression works.
+
+**1.**
+
+Here weight=1/y_hat from the original OLS model.
+
+```{r}
+abalone$yhat=predict(g,data=abalone)
+abalone$wt_1=1/abalone$yhat
+g_wt1<-lm(rings~length,data=abalone, weights = wt_1)
+summary(g_wt1)
+```
+
+With this weighting, the length variable parameter now increases from 14.9464 to 15.5297, and remains significant. The t statistic increases as well, which means the predictor has become even more significant. $R^2$ increases from 0.3099 to 0.3803. 
+
+**2.**
+
+Here we regress the $|\sigma_i|$ from original modle on predictor length, and get the $1/\text{predicted}^2$ as weight.
+
+```{r}
+abalone$resid_abs=abs(abalone$rings-predict(g,data=abalone))
+
+fit2<-lm(resid_abs~length,data=abalone)
+abalone$wt_2=1/(predict(fit2,data=abalone))^2
+
+g_wt2<-lm(rings~length,data=abalone, weights = wt_2)
+summary(g_wt2)
+```
+
+Here the parameter estimate of length is similar to what we have from the first weight (15.9966), and still significant. $R^2$ has a significant change, increasing from 0.3099 to 0.4465.  
+
+**3.**
+
+Here we regress the $|\sigma_i^2|$ from original modle on predictor length, and get 1/predicted as weight.
+
+```{r}
+abalone$resid_sq=(abalone$resid_abs)^2
+
+fit3<-lm(resid_sq~length,data = abalone)
+abalone$wt_3=abs(1/predict(fit3,data=abalone))
+
+g_wt3<-lm(rings~length,data = abalone,weights = wt_3)
+summary(g_wt3)
+
+```
+
+Here parameter the estimate of length is now 16.1564 comparing to the 14.9464 from orignial model, and still significant. $R^2$ now increases to 0.5256, which is a pretty good result compared to the original 0.3098.
+
+Thus, overall, we actually see that when we encounter the nonconstant residual problem, the weighted least squares regression method is a great way to both improve the parameter estimates and overall goodness of fit. (Note that weighting methods are not limited to the three we demonstrated here.) 
+
+### Python
+The first step is to load the appropriate packages, load the data, and fit a simple OLS model.
+
+```{python, eval=FALSE}  
+## Load Packages
+%matplotlib inline
+import numpy as np
+import pandas as pd 
+import seaborn as sns
+import matplotlib.pyplot as plt
+import statsmodels.formula.api as smf 
+import statsmodels.api as sm
+from statsmodels.graphics.gofplots import ProbPlot
+``` 
+
+```{python, eval = FALSE} 
+## Load data
+data = pd.read_csv('abalone.csv',na_values=['?']) 
+## selecting only variables we use 
+data = data.loc[:,['Length', 'Rings']]
+``` 
+
+```{python, eval = FALSE}
+## fit the OLS model and check the result
+model_ols = smf.ols("Rings ~ Length", data=data).fit() 
+print(model_ols.summary())
+``` 
+![Caption for the picture.](1.png)
+Here $R^2 = 0.310$, and the t-statistic is 43.303. However, diagnostics should be performed to confirm that this model is appropriate. 
+
+```{python, eval = FALSE}
+# fitted values (need a constant term for intercept)
+model_fitted_y = model_ols.fittedvalues
+# model residuals
+model_residuals = model_ols.resid
+# normalized residuals
+model_norm_residuals = model_ols.get_influence().resid_studentized_internal
+# absolute residuals
+model_abs_resid = np.abs(model_residuals)
+```
+
+```{python, eval = FALSE} 
+plot_lm_1 = plt.figure(1)
+plot_lm_1.set_figheight(8)
+plot_lm_1.set_figwidth(12)
+plot_lm_1.axes[0] = sns.residplot(model_fitted_y, 'Rings', data=data, 
+                          lowess=True, 
+                          scatter_kws={'alpha': 0.5}, 
+                          line_kws={'color': 'red', 'lw': 1, 'alpha': 0.8})
+plot_lm_1.axes[0].set_title('Residuals vs Fitted')
+plot_lm_1.axes[0].set_xlabel('Fitted values')
+plot_lm_1.axes[0].set_ylabel('Residuals')
+
+# annotations
+abs_resid = model_abs_resid.sort_values(ascending=False)
+abs_resid_top_3 = abs_resid[:3]
+for i in abs_resid_top_3.index:
+    plot_lm_1.axes[0].annotate(i, 
+                               xy=(model_fitted_y[i], 
+                                   model_residuals[i]));
+```
+![Caption for the picture.](2.png)
+As shown in the Residuals vs Fitted plot, there is a megaphone shape, which indicates that non-constant variance is likely to be an issue. We will try to use weighted least squares to address this. We are going to use three different weights (based on the approaches suggested at the link above).
+
+Weighted Least Square  
+**1.**
+
+The weight here is the inverse of the fitted values obtained from the OLS model.
+```{python, eval = FALSE}
+## An interecept is not included by default, so we have to add it manually
+y=data["Rings"]
+y=y.tolist() 
+x=data["Length"] 
+x=x.tolist()   
+## add a intercept point
+x = sm.add_constant(x) 
+
+## Compute the weight and add it to the column named "weight_1"
+data["weight_1"] = model_fitted_y  
+data["weight_1"] = data["weight_1"]**-1
+model_wls_1 = sm.WLS(y, x, data['weight_1']) 
+mod_res_1 = model_wls_1.fit() 
+print(mod_res_1.summary())
+```
+![Caption for the picture.](3.png)
+After putting weight in the model, the estimate of coefficient changed slightly. The R-square and the t-statistic both increased. The $R^2 = 0.38$ and the t-statistic is 50.621.  
+
+**2.** 
+
+Here we regress the absolute values of the residuals against the predictor (which is the same as regressing against the fitted value since we only have one predictor). The resulting fitted values of this regression is an estimates of the error and we will use it as the weight.
+```{python, eval = FALSE}
+## Compute the weight and add it to the column named "weight_2"
+data["temp"] = model_abs_resid 
+model_temp = smf.ols("temp ~ Length", data=data).fit()  
+weight_2 = model_temp.fittedvalues 
+weight_2 = weight_2**-2 
+data['weight_2'] = weight_2 
+
+mod_wls = sm.WLS(y,x, data['weight_2'])
+mod_res = mod_wls.fit()
+print(mod_res.summary())
+```
+![Caption for the picture.](4.png)
+Now $R^2 = 0.447$ and $t = 58.054$, both increases compared to the previous model.
+
+**3.**
+
+Here we regress the squared residuals against the predictor (which again is the same as regressing against the fitted value since we only have one predictor). The resulting fitted values are used as weight. 
+
+```{python, eval = FALSE} 
+## Compute the weight and add it to the column named "weight_3"
+data["temp"] = model_residuals**2  
+model_temp = smf.ols("temp ~ Length", data=data).fit()  
+weight_3 = model_temp.fittedvalues
+weight_3 = abs(weight_3) 
+weight_3 = weight_3**-1 
+data['weight_3'] = weight_3 
+
+mod_wls = sm.WLS(y,x, data['weight_3'])
+mod_res = mod_wls.fit()
+print(mod_res.summary())
+```
+![Caption for the picture.](5.png)
+Compared to the previous models, we have the largest $R^2$ and t-statistic. Now $R^2 = 0.526$ and the t-statistic is 68.013. The result suggests that weighted least squares is a good way to improve model fit and parameter estimate if we have non-constant variance problem. There are many kinds of methods to choose the weight, and the best one may be different for any given dataset.
+
+
+
+
